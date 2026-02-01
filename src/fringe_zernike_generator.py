@@ -27,24 +27,13 @@ from matplotlib.colors import Normalize
 import matplotlib.gridspec as gridspec
 import math
 from matplotlib.patches import Patch
+from grid_utils import GridGenerator  # 导入统一网格工具
 
 
 # ------------------------------
 # 核心工具函数：自动生成Fringe索引映射和径向多项式
 # ------------------------------
 def generate_fringe_mapping(N):
-    """
-    自动生成Fringe索引与(m, k, n, 类型, 名称)的映射关系
-    严格遵循论文排序规则：
-    1. 按s = m+k 升序分组（行）
-    2. 每行内按m从s降序到0（m最大→m=0）
-    3. m>0时生成cos(mθ)（x向）和sin(mθ)（y向）两个项
-    4. m=0时生成1个项（无角度依赖）
-    Parameters:
-        N: 最大Fringe索引（需要生成的阶数）
-    Returns:
-        mapping: 列表，index从0（未使用）到N，每个元素包含多项式参数
-    """
     mapping = [{}]  # index 0未使用
     current_index = 1
     s = 0  # s = m + k（分组标识）
@@ -55,26 +44,24 @@ def generate_fringe_mapping(N):
             k = s - m  # k = s - m（保证s = m+k）
             n = m + 2 * k  # Zernike径向阶数（n ≥ m，n和m同奇偶）
 
-            # 自动生成多项式名称（遵循论文Table 1命名规则）
+            # 自动生成多项式名称
             if m == 0:
                 if n == 0:
                     name = "Piston"
                 elif n == 2:
                     name = "Focus"
-                else:  # n ≥4 且为偶数（球差）
+                else:
                     name = "Spherical aberration"
-                # m=0：仅1个多项式（无角度项）
                 mapping.append({
                     "index": current_index,
                     "m": m, "k": k, "n": n, "s": s,
-                    "poly_type": "zero",  # 无角度依赖
+                    "poly_type": "zero",
                     "name": name
                 })
                 current_index += 1
                 if current_index > N:
                     break
             else:
-                # m>0：生成cos和sin两个多项式（x/y向）
                 if m == 1:
                     name_cos = "Tilt x" if n == 1 else "Coma x"
                     name_sin = "Tilt y" if n == 1 else "Coma y"
@@ -115,14 +102,16 @@ def generate_fringe_mapping(N):
 
 def radial_polynomial(r, n, m):
     """
-    计算Zernike径向多项式Rₙᵐ(r)（基于论文Eq.(1)求和公式）
-    Parameters:
-        r: 径向坐标（标量或2D数组，r ∈ [0,1]）
-        n: 径向阶数（n ≥ m，n和m同奇偶）
-        m: 角向阶数（m ≥ 0）
-    Returns:
-        R: 径向多项式值（与r同形状）
+    Zernike径向多项式：自动处理r>1的情况（返回0）
+    :param r: 极径（任意范围，r>1时返回0）
+    :param n: 径向阶数
+    :param m: 角向阶数
+    :return: 径向多项式值（r>1时=0）
     """
+    # 核心：单位圆外直接返回0，符合Zernike定义
+    if np.any(r > 1):
+        r = np.where(r > 1, 0, r)
+
     if n < m or (n - m) % 2 != 0:
         return np.zeros_like(r, dtype=np.float64)
 
@@ -141,36 +130,24 @@ def radial_polynomial(r, n, m):
 
 
 def get_radial_expression(n, m):
-    """
-    生成径向多项式Rₙᵐ(r)的数学表达式字符串（系数化简为具体数值）
-    Parameters:
-        n: 径向阶数
-        m: 角向阶数
-    Returns:
-        expr: 径向多项式表达式字符串
-    """
     if n < m or (n - m) % 2 != 0:
         return "0"
 
     k = (n - m) // 2
     terms = []
     for s in range(0, k + 1):
-        # 计算系数的具体数值（化简阶乘）
         sign = (-1) ** s
         fact_n_s = math.factorial(n - s)
         fact_s = math.factorial(s)
         fact_nm2_s = math.factorial((n + m) // 2 - s)
         fact_nm2_s2 = math.factorial((n - m) // 2 - s)
 
-        # 计算系数值
         coefficient = sign * fact_n_s / (fact_s * fact_nm2_s * fact_nm2_s2)
-        # 简化系数显示（整数显示为整数，小数保留3位）
         if coefficient.is_integer():
             coeff_str = f"{int(coefficient)}"
         else:
             coeff_str = f"{coefficient:.3f}"
 
-        # 幂次项
         power = n - 2 * s
         if power == 0:
             r_term = "1"
@@ -179,7 +156,6 @@ def get_radial_expression(n, m):
         else:
             r_term = f"r^{power}"
 
-        # 组合项（处理系数为1/-1的特殊情况）
         if coeff_str == "1" and power != 0:
             term_str = r_term
         elif coeff_str == "-1" and power != 0:
@@ -189,64 +165,48 @@ def get_radial_expression(n, m):
 
         terms.append(term_str)
 
-    # 组合所有项（处理符号，避免出现"+ -"）
     radial_expr = " + ".join(terms).replace(" + -", " - ")
     return f"R_{n}^{m}(r) = {radial_expr}"
 
 
 # ------------------------------
-# Zernike多项式生成与绘图类（优化版）
+# Zernike多项式生成与绘图类（重构版）
 # ------------------------------
 class FringeZernike:
     """
-    基于Fringe索引的Zernike多项式自动生成与阶梯图绘制类
-    特性：
-    1. 支持自定义阶数（1~任意正整数，如64阶）
-    2. 自动生成多项式（无需手动编写）
-    3. 严格遵循论文阶梯图排布（按s=m+k分组、右对齐）
-    4. 默认jet色彩映射
-    5. 支持打印各阶多项式的数学表达式（系数已化简）
+    重构后：
+    1. 不再内部生成网格，依赖外部GridGenerator
+    2. 专注于Zernike多项式计算，逻辑更单一
+    3. 自动处理r>1的情况，无需外部干预
     """
 
-    def __init__(self, max_order, resolution=128):
+    def __init__(self, max_order: int, grid: GridGenerator):
         """
-        初始化生成器
-        Parameters:
-            max_order: 最大Fringe索引（需要生成的阶数，如64）
-            resolution: 网格分辨率（默认128x128，越高越清晰）
+        :param max_order: 最大Fringe索引
+        :param grid: 统一网格工具实例（GridGenerator）
         """
         # 输入验证
         if not isinstance(max_order, int) or max_order < 1:
             raise ValueError(f"阶数必须是正整数，当前输入：{max_order}")
+        if not isinstance(grid, GridGenerator):
+            raise TypeError("grid必须是GridGenerator实例")
 
         self.max_order = max_order
-        self.resolution = resolution
+        self.grid = grid  # 依赖外部统一网格
 
-        # 生成极坐标/笛卡尔坐标网格
-        self._create_grid()
-
-        # 自动生成多项式定义（核心优化：无需手动写每个多项式）
+        # 自动生成多项式定义
         self.zernike_defs = self._auto_generate_zernike()
 
-        # 按s=m+k分组（用于阶梯图布局）
+        # 按s=m+k分组（用于绘图）
         self.s_groups = self._group_by_s()
 
-        # 预计算全局最大振幅（统一颜色范围，保证对比一致性）
+        # 预计算全局最大振幅
         self.max_amplitude = self._get_global_max_amp()
 
-        # 最大列数（用于右对齐布局：最大2s+1）
+        # 最大列数（用于右对齐布局）
         self.max_columns = max(2 * s + 1 for s in self.s_groups.keys())
 
-    def _create_grid(self):
-        """生成极坐标（r, θ）和笛卡尔坐标（x, y）网格"""
-        r = np.linspace(0, 1, self.resolution)
-        theta = np.linspace(0, 2 * np.pi, self.resolution)
-        self.rr, self.tt = np.meshgrid(r, theta)
-        self.x = self.rr * np.cos(self.tt)
-        self.y = self.rr * np.sin(self.tt)
-
     def _auto_generate_zernike(self):
-        """自动生成所有多项式的定义（基于Fringe索引映射）"""
         fringe_mapping = generate_fringe_mapping(self.max_order)
         zernike_defs = [{}]  # index 0未使用
 
@@ -255,20 +215,27 @@ class FringeZernike:
                 break
             params = fringe_mapping[idx]
 
-            # 动态创建多项式函数
+            # 动态创建多项式函数（依赖外部网格）
             def create_zernike_func(m, n, poly_type):
-                def func(rr, tt):
-                    R = radial_polynomial(rr, n, m)  # 径向部分
-                    # 角向部分（论文中的cos mθ/sin mθ）
+                def func():
+                    R = radial_polynomial(self.grid.rho, n, m)  # 使用统一极径
+                    # 角向部分
                     if poly_type == "zero":
-                        angular = np.ones_like(tt)
+                        angular = np.ones_like(self.grid.theta)
                     elif poly_type == "cos":
-                        angular = np.cos(m * tt)
+                        angular = np.cos(m * self.grid.theta)
                     elif poly_type == "sin":
-                        angular = np.sin(m * tt)
+                        angular = np.sin(m * self.grid.theta)
                     else:
-                        angular = np.zeros_like(tt)
-                    return R * angular  # Zernike多项式 = 径向 × 角向
+                        angular = np.zeros_like(self.grid.theta)
+
+                    # 正交归一化因子（标准Zernike）
+                    if m == 0:
+                        norm_factor = np.sqrt(2 * n + 1)
+                    else:
+                        norm_factor = np.sqrt(2 * (2 * n + 1))
+
+                    return norm_factor * R * angular
 
                 return func
 
@@ -279,26 +246,24 @@ class FringeZernike:
             zernike_defs.append({
                 "index": idx,
                 "name": params["name"],
-                "m": params["m"],  # 角向阶数
-                "n": params["n"],  # 径向阶数
-                "s": params["s"],  # s = m+k（分组标识）
+                "m": params["m"],
+                "n": params["n"],
+                "s": params["s"],
                 "poly_type": params["poly_type"],
                 "func": zernike_func
             })
         return zernike_defs
 
     def _group_by_s(self):
-        """按s=m+k分组，返回{s: [索引列表]}（用于阶梯图行布局）"""
         s_groups = {}
         for idx in range(1, self.max_order + 1):
             s = self.zernike_defs[idx]["s"]
             if s not in s_groups:
                 s_groups[s] = []
             s_groups[s].append(idx)
-        return dict(sorted(s_groups.items()))  # 按s升序排序
+        return dict(sorted(s_groups.items()))
 
     def _get_global_max_amp(self):
-        """计算所有多项式的最大绝对值（统一颜色范围）"""
         max_amp = 0.0
         for idx in range(1, self.max_order + 1):
             z = self.generate(idx)
@@ -307,35 +272,18 @@ class FringeZernike:
                 max_amp = current_max
         return max_amp
 
-    def generate(self, index):
-        """
-        根据Fringe索引生成Zernike多项式值
-        Parameters:
-            index: Fringe索引（1~self.max_order）
-        Returns:
-            z: 2D数组（resolution×resolution），多项式振幅分布
-        """
+    def generate(self, index: int) -> np.ndarray:
+        """生成指定索引的Zernike多项式（size×size）"""
         if not (1 <= index <= self.max_order):
             raise ValueError(f"索引必须在1~{self.max_order}之间，当前输入：{index}")
-        return self.zernike_defs[index]["func"](self.rr, self.tt)
+        return self.zernike_defs[index]["func"]()
 
     def print_zernike_expression(self, index=None):
-        """
-        打印Zernike多项式的数学表达式（系数已化简为具体数值）
-        Parameters:
-            index: 可选，指定要打印的索引（1~self.max_order）；若为None，打印所有阶数
-        """
         print("\n" + "=" * 80)
         print("Zernike多项式数学表达式（Fringe索引 | 系数已化简）")
         print("=" * 80)
 
-        # 确定要打印的索引范围
-        if index is not None:
-            if not (1 <= index <= self.max_order):
-                raise ValueError(f"索引必须在1~{self.max_order}之间，当前输入：{index}")
-            indices = [index]
-        else:
-            indices = range(1, self.max_order + 1)
+        indices = [index] if index is not None else range(1, self.max_order + 1)
 
         for idx in indices:
             z_info = self.zernike_defs[idx]
@@ -343,10 +291,8 @@ class FringeZernike:
             n = z_info["n"]
             poly_type = z_info["poly_type"]
 
-            # 生成径向部分表达式（系数已化简）
             radial_expr = get_radial_expression(n, m)
 
-            # 生成角向部分表达式
             if poly_type == "zero":
                 angular_expr = "1"
             elif poly_type == "cos":
@@ -356,13 +302,11 @@ class FringeZernike:
             else:
                 angular_expr = "0"
 
-            # 生成完整表达式
             full_expr = f"Z_{idx}(r,θ) = {radial_expr.split('=')[1].strip()} × {angular_expr}"
 
-            # 打印格式化信息
             print(f"\n【Fringe索引 {idx:3d}】")
             print(f"  名称: {z_info['name']:25s}")
-            print(f"  参数: m={m:2d} (角向阶数), n={n:2d} (径向阶数), s={z_info['s']:2d} (m+k)")
+            print(f"  参数: m={m:2d}, n={n:2d}, s={z_info['s']:2d}")
             print(f"  径向部分: {radial_expr}")
             print(f"  角向部分: Θ(θ) = {angular_expr}")
             print(f"  完整表达式: {full_expr}")
@@ -370,38 +314,28 @@ class FringeZernike:
         print("\n" + "=" * 80)
 
     def plot_single(self, index, figsize=(6, 5), cmap="jet"):
-        """
-        绘制单个Zernike多项式（默认jet色彩）
-        Parameters:
-            index: Fringe索引（1~self.max_order）
-            figsize: 图像尺寸
-            cmap: 色彩映射（默认jet）
-        """
         z = self.generate(index)
         z_info = self.zernike_defs[index]
 
         fig, ax = plt.subplots(figsize=figsize)
         norm = Normalize(vmin=-self.max_amplitude, vmax=self.max_amplitude)
 
-        # 绘制圆形区域的多项式分布
         contour = ax.contourf(
-            self.x, self.y, z,
+            self.grid.x, self.grid.y, z,
             levels=50, cmap=cmap, norm=norm,
             extend="both"
         )
 
-        # 图形美化
         ax.set_xlim(-1.05, 1.05)
         ax.set_ylim(-1.05, 1.05)
         ax.set_aspect("equal")
         ax.set_title(
             f"Fringe Zernike #{index}\n"
-            f"Name: {z_info['name']} | m={z_info['m']}, n={z_info['n']}, s={z_info['s']}",
+            f"Name: {z_info['name']} | m={z_info['m']}, n={z_info['n']}",
             fontsize=12, pad=10
         )
         ax.axis("off")
 
-        # 添加颜色条
         cbar = plt.colorbar(contour, ax=ax, shrink=0.8)
         cbar.set_label("Amplitude", fontsize=10)
 
@@ -409,67 +343,51 @@ class FringeZernike:
         plt.show()
 
     def plot_all_stepwise(self, figsize=None, cmap="jet", title_fontsize=22):
-        """
-        按论文阶梯图排布绘制所有多项式（核心功能）
-        布局规则：
-        - 行：按s=m+k升序（s=0,1,2,...）
-        - 列：每行按m降序（从s→0），右对齐（最后一列均为m=0项）
-        """
-        # 自动调整图大小（根据阶数动态适配）
         if figsize is None:
             rows = len(self.s_groups)
             cols = self.max_columns
-            figsize = (cols * 2.2, rows * 2.2)  # 阶数高时自动扩大
+            figsize = (cols * 2.2, rows * 2.2)
 
         fig = plt.figure(figsize=figsize)
         norm = Normalize(vmin=-self.max_amplitude, vmax=self.max_amplitude)
 
-        # 关键修正：GridSpec参数改为nrows/ncols（原错误：rows/cols）
         gs = gridspec.GridSpec(
-            nrows=len(self.s_groups), ncols=self.max_columns,  # 修正参数名
+            nrows=len(self.s_groups), ncols=self.max_columns,
             figure=fig, hspace=0.3, wspace=0.3
         )
 
-        # 遍历每个s组（行）
         for row_idx, (s, indices) in enumerate(self.s_groups.items()):
-            row_cols = 2 * s + 1  # 当前行的列数（2s+1）
-            start_col = self.max_columns - row_cols  # 右对齐起始列
+            row_cols = 2 * s + 1
+            start_col = self.max_columns - row_cols
 
-            # 遍历当前行的每个多项式（列）
             for col_offset, idx in enumerate(indices):
                 col_idx = start_col + col_offset
                 z = self.generate(idx)
                 z_info = self.zernike_defs[idx]
 
-                # 创建子图
                 ax = fig.add_subplot(gs[row_idx, col_idx])
-
-                # 绘制多项式
                 ax.contourf(
-                    self.x, self.y, z,
+                    self.grid.x, self.grid.y, z,
                     levels=30, cmap=cmap, norm=norm,
                     extend="both"
                 )
 
-                # 子图属性设置
                 ax.set_xlim(-1.02, 1.02)
                 ax.set_ylim(-1.02, 1.02)
                 ax.set_aspect("equal")
                 ax.set_title(
                     f"#{idx}\n{z_info['name']}",
-                    fontsize=7 if self.max_order > 36 else 8,  # 阶数高时缩小字体
+                    fontsize=7 if self.max_order > 36 else 8,
                     pad=3
                 )
                 ax.axis("off")
 
-        # 全局标题和颜色条
         fig.suptitle(
             f"Fringe Zernike Polynomials (Order 1-{self.max_order})\n"
             f"Stepwise Layout (Grouped by s=m+k, Right-Aligned)",
             fontsize=title_fontsize, y=0.98
         )
 
-        # 全局颜色条（右侧）
         cbar_ax = fig.add_axes([0.93, 0.08, 0.015, 0.82])
         cbar = fig.colorbar(
             plt.cm.ScalarMappable(norm=norm, cmap=cmap),
@@ -478,38 +396,54 @@ class FringeZernike:
         cbar.set_label("Normalized Amplitude", fontsize=14, labelpad=10)
         cbar.ax.tick_params(labelsize=12)
 
-        # 保存高分辨率图片
-        # filename = f"fringe_zernike_order_{self.max_order}_stepwise_jet.png"
-        # plt.savefig(filename, dpi=300, bbox_inches="tight")
-        # print(f"阶梯图已保存为：{filename}")
         plt.show()
 
 
 # ------------------------------
-# 测试代码（支持手动输入阶数）
+# 自验证main函数
 # ------------------------------
 if __name__ == "__main__":
-    # 1. 手动输入需要生成的阶数（如64）
-    max_order = int(64)
+    print("=" * 80)
+    print("FringeZernikeGenerator 自验证开始")
+    print("=" * 80)
 
-    # 2. 创建生成器（分辨率可调整为256提升清晰度，耗时略增加）
-    zernike_gen = FringeZernike(max_order=max_order, resolution=128)
+    # 1. 生成统一网格
+    grid = GridGenerator(size=512)
+    print(f"✅ 统一网格生成成功（size={grid.size}）")
 
-    # 3. 打印多项式表达式（系数已化简）
-    print("\n📝 打印所有Zernike多项式表达式（系数已化简）...")
-    # 如需打印单个阶数，使用：zernike_gen.print_zernike_expression(index=4)
-    zernike_gen.print_zernike_expression(index=None)
+    # 2. 初始化生成器
+    try:
+        zernike_gen = FringeZernike(max_order=64, grid=grid)
+        print(f"✅ 生成器初始化成功（max_order=8）")
+    except Exception as e:
+        print(f"❌ 生成器初始化失败：{e}")
+        exit(1)
 
-    # 4. 可选：绘制单个多项式（示例：索引4=Focus）
-    print(f"\n📊 绘制单个多项式（索引1：{zernike_gen.zernike_defs[4]['name']}）...")
-    zernike_gen.plot_single(index=4, cmap="jet")
+    # 3. 验证多项式生成
+    try:
+        z4 = zernike_gen.generate(4)
+        print(f"✅ 索引4（Focus）多项式生成成功，形状：{z4.shape}")
+        print(f"✅ 索引4多项式振幅范围：{z4.min():.4f} ~ {z4.max():.4f}")
+        # 验证单位圆外值为0
+        non_zero_outside = np.sum(z4[~grid.circle_mask] != 0)
+        print(f"✅ 单位圆外非零值数量：{non_zero_outside}（应=0）")
+    except Exception as e:
+        print(f"❌ 多项式生成失败：{e}")
 
-    # 5. 绘制所有多项式的阶梯图（论文风格，右对齐，jet色彩）
-    print(f"\n📊 绘制1-{max_order}阶阶梯图（请耐心等待，阶数越高耗时越长）...")
-    zernike_gen.plot_all_stepwise(cmap="jet")
+    # 4. 验证表达式打印
+    try:
+        zernike_gen.print_zernike_expression(index=4)
+        print("✅ 多项式表达式打印成功")
+    except Exception as e:
+        print(f"❌ 表达式打印失败：{e}")
 
-    # 6. 打印前10个多项式的信息（验证Fringe索引正确性）
-    print("\n📋 前10个多项式信息（Fringe索引顺序）：")
-    for idx in range(1, max_order + 1):
-        z = zernike_gen.zernike_defs[idx]
-        print(f"索引{idx:2d} | 名称：{z['name']:20s} | m={z['m']:2d} | n={z['n']:2d} | s={z['s']:2d}")
+    # 5. 验证绘图
+    try:
+        zernike_gen.plot_single(index=4, cmap="jet")
+        print("✅ 单个多项式绘图成功")
+    except Exception as e:
+        print(f"❌ 绘图失败：{e}")
+
+    print("=" * 80)
+    print("FringeZernikeGenerator 自验证完成")
+    print("=" * 80)
