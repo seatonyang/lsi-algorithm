@@ -1,5 +1,5 @@
 
-# PSI Algorithm：基于Fringe索引的Zernike拟合
+# PSI Algorithm：基于Fringe索引的Zernike拟合全流程
 
 ![Static Badge](https://img.shields.io/badge/python-3.13-green)
 ![Static Badge](https://img.shields.io/badge/license-MIT-orange)
