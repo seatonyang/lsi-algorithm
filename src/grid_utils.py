@@ -55,4 +55,3 @@ class GridGenerator:
         """
         return np.where(self.circle_mask, phase, np.nan)
 
-
