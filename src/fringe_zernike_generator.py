@@ -142,7 +142,7 @@ def radial_polynomial(r, n, m):
 
 def get_radial_expression(n, m):
     """
-    生成径向多项式Rₙᵐ(r)的数学表达式字符串（LaTeX风格）
+    生成径向多项式Rₙᵐ(r)的数学表达式字符串（系数化简为具体数值）
     Parameters:
         n: 径向阶数
         m: 角向阶数
@@ -155,30 +155,42 @@ def get_radial_expression(n, m):
     k = (n - m) // 2
     terms = []
     for s in range(0, k + 1):
-        # 计算系数
-        numerator = f"(-1)^{s} × {math.factorial(n - s)}"
-        denom_part1 = math.factorial(s)
-        denom_part2 = math.factorial((n + m) // 2 - s)
-        denom_part3 = math.factorial((n - m) // 2 - s)
-        denominator = f"{denom_part1} × {denom_part2} × {denom_part3}"
+        # 计算系数的具体数值（化简阶乘）
+        sign = (-1) ** s
+        fact_n_s = math.factorial(n - s)
+        fact_s = math.factorial(s)
+        fact_nm2_s = math.factorial((n + m) // 2 - s)
+        fact_nm2_s2 = math.factorial((n - m) // 2 - s)
+
+        # 计算系数值
+        coefficient = sign * fact_n_s / (fact_s * fact_nm2_s * fact_nm2_s2)
+        # 简化系数显示（整数显示为整数，小数保留3位）
+        if coefficient.is_integer():
+            coeff_str = f"{int(coefficient)}"
+        else:
+            coeff_str = f"{coefficient:.3f}"
 
         # 幂次项
         power = n - 2 * s
-        r_term = f"r^{power}" if power != 1 else "r"
-
-        # 组合项
-        if denom_part1 * denom_part2 * denom_part3 == 1:
-            term_str = f"(-1)^{s} × {math.factorial(n - s)} × {r_term}"
+        if power == 0:
+            r_term = "1"
+        elif power == 1:
+            r_term = "r"
         else:
-            term_str = f"[ {numerator} / ({denominator}) ] × {r_term}"
+            r_term = f"r^{power}"
+
+        # 组合项（处理系数为1/-1的特殊情况）
+        if coeff_str == "1" and power != 0:
+            term_str = r_term
+        elif coeff_str == "-1" and power != 0:
+            term_str = f"-{r_term}"
+        else:
+            term_str = f"{coeff_str}×{r_term}"
+
         terms.append(term_str)
 
-    # 组合所有项
-    if len(terms) == 1:
-        radial_expr = terms[0]
-    else:
-        radial_expr = " + ".join(terms)
-
+    # 组合所有项（处理符号，避免出现"+ -"）
+    radial_expr = " + ".join(terms).replace(" + -", " - ")
     return f"R_{n}^{m}(r) = {radial_expr}"
 
 
@@ -193,7 +205,7 @@ class FringeZernike:
     2. 自动生成多项式（无需手动编写）
     3. 严格遵循论文阶梯图排布（按s=m+k分组、右对齐）
     4. 默认jet色彩映射
-    5. 支持打印各阶多项式的数学表达式
+    5. 支持打印各阶多项式的数学表达式（系数已化简）
     """
 
     def __init__(self, max_order, resolution=128):
@@ -309,12 +321,12 @@ class FringeZernike:
 
     def print_zernike_expression(self, index=None):
         """
-        打印Zernike多项式的数学表达式
+        打印Zernike多项式的数学表达式（系数已化简为具体数值）
         Parameters:
             index: 可选，指定要打印的索引（1~self.max_order）；若为None，打印所有阶数
         """
         print("\n" + "=" * 80)
-        print("Zernike多项式数学表达式（Fringe索引）")
+        print("Zernike多项式数学表达式（Fringe索引 | 系数已化简）")
         print("=" * 80)
 
         # 确定要打印的索引范围
@@ -331,7 +343,7 @@ class FringeZernike:
             n = z_info["n"]
             poly_type = z_info["poly_type"]
 
-            # 生成径向部分表达式
+            # 生成径向部分表达式（系数已化简）
             radial_expr = get_radial_expression(n, m)
 
             # 生成角向部分表达式
@@ -474,29 +486,29 @@ class FringeZernike:
 
 
 # ------------------------------
-# 测试代码
+# 测试代码（支持手动输入阶数）
 # ------------------------------
 if __name__ == "__main__":
     # 1. 手动输入需要生成的阶数（如64）
-    max_order = int(100)
-
+    max_order = int(64)
 
     # 2. 创建生成器（分辨率可调整为256提升清晰度，耗时略增加）
     zernike_gen = FringeZernike(max_order=max_order, resolution=128)
 
-    # 3. 打印多项式表达式（新增功能）
-    print("\n📝 打印前10阶Zernike多项式表达式...")
-    zernike_gen.print_zernike_expression(index=None)  # None打印所有，指定index打印单个（如index=4）
+    # 3. 打印多项式表达式（系数已化简）
+    print("\n📝 打印所有Zernike多项式表达式（系数已化简）...")
+    # 如需打印单个阶数，使用：zernike_gen.print_zernike_expression(index=4)
+    zernike_gen.print_zernike_expression(index=None)
 
-    # 4. 可选：绘制单个多项式（示例：索引1=Piston，索引4=Focus）
-    print(f"\n📊 绘制单个多项式（索引1：{zernike_gen.zernike_defs[1]['name']}）...")
-    zernike_gen.plot_single(index=1, cmap="jet")
+    # 4. 可选：绘制单个多项式（示例：索引4=Focus）
+    print(f"\n📊 绘制单个多项式（索引1：{zernike_gen.zernike_defs[4]['name']}）...")
+    zernike_gen.plot_single(index=4, cmap="jet")
 
     # 5. 绘制所有多项式的阶梯图（论文风格，右对齐，jet色彩）
     print(f"\n📊 绘制1-{max_order}阶阶梯图（请耐心等待，阶数越高耗时越长）...")
     zernike_gen.plot_all_stepwise(cmap="jet")
 
-    # 6. 打印多项式的信息（验证Fringe索引正确性）
+    # 6. 打印前10个多项式的信息（验证Fringe索引正确性）
     print("\n📋 前10个多项式信息（Fringe索引顺序）：")
     for idx in range(1, max_order + 1):
         z = zernike_gen.zernike_defs[idx]
