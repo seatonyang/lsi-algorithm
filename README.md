@@ -51,8 +51,8 @@ matplotlib >= 3.4.0
 ```Bash
 
 # 克隆仓库
-git clone https://github.com/your-username/FringeZernike-Interferogram-Simulation.git
-cd FringeZernike-Interferogram-Simulation
+git clone https://github.com/seatonyang/PSI-Algorithm.git
+cd PSI-Algorithm
 
 # 安装依赖
 pip install -r requirements.txt
