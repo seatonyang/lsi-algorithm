@@ -9,107 +9,106 @@
 @Description : 
 """
 
-
 import numpy as np
 import math
+from fringe_zernike_generator import FringeZernike  # 导入用户的Zernike生成类
+
 
 class InterferogramSimulator:
-    """干涉图仿真类：生成带圆掩码的相移干涉图"""
+    """干涉图仿真类：生成带圆掩码的相移干涉图（适配用户Fringe索引Zernike）"""
+
     def __init__(self,
                  img_size: tuple = (512, 512),
-                 zernike_params: list = None,
+                 max_order: int = 16,  # Fringe最大索引
                  true_coeffs: np.ndarray = None,
                  phase_shifts: list = None,
                  I0: float = 1.0,
                  gamma: float = 0.8,
                  noise_std: float = 0.03):
         """
-        初始化仿真参数
+        初始化仿真参数（适配Fringe索引）
         :param img_size: 干涉图尺寸
-        :param zernike_params: Zernike项(n,m)列表
-        :param true_coeffs: 真实Zernike系数
+        :param max_order: Fringe索引最大阶数（对应true_coeffs长度）
+        :param true_coeffs: Fringe索引对应的真实系数（索引1~max_order）
         :param phase_shifts: 相移量列表
         :param I0: 光强直流分量
         :param gamma: 调制深度
         :param noise_std: 噪声标准差
         """
         self.img_size = img_size
-        self.zernike_params = zernike_params
-        self.true_coeffs = true_coeffs
+        self.max_order = max_order
+        self.true_coeffs = true_coeffs  # 长度=max_order，对应Fringe索引1~max_order
         self.phase_shifts = phase_shifts
         self.I0 = I0
         self.gamma = gamma
         self.noise_std = noise_std
 
-        # 内部变量（生成后赋值）
+        # 内部变量
         self.interferograms = None
         self.true_phase = None
         self.rho = None
         self.theta = None
         self.circle_mask = None
-
-    def _zernike_radial(self, n: int, m: int, rho: np.ndarray) -> np.ndarray:
-        """内部方法：计算Zernike径向多项式"""
-        abs_m = abs(m)
-        if abs_m > n or (n - abs_m) % 2 != 0:
-            return np.zeros_like(rho)
-
-        s_max = (n - abs_m) // 2
-        R = np.zeros_like(rho, dtype=np.float64)
-        for s in range(s_max + 1):
-            coeff = ((-1) ** s) * math.factorial(n - s) / (
-                    math.factorial(s) *
-                    math.factorial((n + abs_m) // 2 - s) *
-                    math.factorial((n - abs_m) // 2 - s)
-            )
-            R += coeff * (rho ** (n - 2 * s))
-        return R
-
-    def _zernike_polynomial(self, n: int, m: int, rho: np.ndarray, theta: np.ndarray) -> np.ndarray:
-        """内部方法：计算完整Zernike多项式"""
-        abs_m = abs(m)
-        R = self._zernike_radial(n, abs_m, rho)
-
-        if m > 0:
-            angular = np.cos(abs_m * theta)
-        elif m < 0:
-            angular = np.sin(abs_m * theta)
-        else:
-            angular = np.ones_like(theta)
-
-        if m == 0:
-            norm = np.sqrt(2 * n + 1)
-        else:
-            norm = np.sqrt(2 * (2 * n + 1))
-        return norm * R * angular
+        self.zernike_generator = None  # 用户的FringeZernike实例
 
     def generate(self) -> tuple:
-        """生成相移干涉图（核心方法）"""
+        """生成相移干涉图（核心方法：使用用户的Zernike生成真实相位）"""
         H, W = self.img_size
         min_size = min(H, W)
-        x = np.linspace(-1, 1, min_size, dtype=np.float64)
-        y = np.linspace(-1, 1, min_size, dtype=np.float64)
+
+        # ========== 修复1：重新生成笛卡尔坐标网格（用于圆形掩码） ==========
+        # 生成笛卡尔坐标网格（-1~1）
+        x = np.linspace(-1, 1, min_size)
+        y = np.linspace(-1, 1, min_size)
         xx, yy = np.meshgrid(x, y)
-
-        # 极坐标+圆掩码
-        self.rho = np.sqrt(xx ** 2 + yy ** 2)
-        self.theta = np.arctan2(yy, xx)
+        # 计算极坐标（rho: 0~√2 → 归一化到0~1）
+        self.rho = np.sqrt(xx ** 2 + yy ** 2)  # 极径（0~√2）
+        self.theta = np.arctan2(yy, xx)  # 极角（-π~π）
+        # 生成严格的圆形掩码（rho<=1为有效区域）
         self.circle_mask = (self.rho <= 1.0)
+        # 归一化极径到0~1（仅圆形区域内有效）
+        self.rho_normalized = np.where(self.circle_mask, self.rho, 0)
 
-        # 生成真实相位（圆外NaN）
-        self.true_phase = np.zeros_like(self.rho, dtype=np.float64)
-        for coeff, (n, m) in zip(self.true_coeffs, self.zernike_params):
-            self.true_phase += coeff * self._zernike_polynomial(n, m, self.rho, self.theta)
+        # ========== 修复2：初始化用户的FringeZernike生成器（适配当前网格） ==========
+        self.zernike_generator = FringeZernike(
+            max_order=self.max_order,
+            resolution=min_size
+        )
+        # 替换用户生成器的网格为当前笛卡尔/极坐标网格（关键修复）
+        self.zernike_generator.x = xx
+        self.zernike_generator.y = yy
+        self.zernike_generator.rr = self.rho_normalized  # 归一化极径
+        self.zernike_generator.tt = self.theta
+
+        # ========== 修复3：生成真实相位（仅圆形区域有效） ==========
+        self.true_phase = np.zeros((min_size, min_size), dtype=np.float64)
+        for idx in range(1, self.max_order + 1):
+            # 用用户的generate方法生成对应Fringe索引的Zernike多项式
+            zernike_poly = self.zernike_generator.generate(idx)
+            # 仅圆形区域累加相位
+            self.true_phase += self.true_coeffs[idx - 1] * zernike_poly * self.circle_mask
+
+        # 圆外相位设为NaN（强制空值）
         self.true_phase = np.where(self.circle_mask, self.true_phase, np.nan)
 
-        # 生成相移干涉图（圆外NaN）
+        # ========== 修复4：生成相移干涉图（仅圆形区域有信号） ==========
         M = len(self.phase_shifts)
         self.interferograms = np.full((M, min_size, min_size), np.nan, dtype=np.float64)
         for i, delta in enumerate(self.phase_shifts):
-            intensity = self.I0 * (1 + self.gamma * np.cos(self.true_phase + delta))
-            noise = np.random.normal(0, self.noise_std, intensity.shape)
-            intensity_noisy = np.clip(intensity + noise, 0, 2 * self.I0)
+            # 仅圆形区域计算光强
+            intensity = np.zeros((min_size, min_size), dtype=np.float64)
+            intensity[self.circle_mask] = self.I0 * (1 + self.gamma * np.cos(self.true_phase[self.circle_mask] + delta))
+            # 添加噪声（仅圆形区域）
+            noise = np.random.normal(0, self.noise_std, (min_size, min_size))
+            intensity_noisy = intensity + noise * self.circle_mask
+            # 裁剪光强范围（0~2I0）
+            intensity_noisy = np.clip(intensity_noisy, 0, 2 * self.I0)
+            # 仅圆形区域赋值，圆外保持NaN
             self.interferograms[i][self.circle_mask] = intensity_noisy[self.circle_mask]
 
-        return self.interferograms, self.true_phase, self.rho, self.theta, self.circle_mask
+        # 调试输出：验证圆形掩码
+        print(f"✅ 圆形掩码验证：有效像素数 = {np.sum(self.circle_mask)}, 总像素数 = {min_size * min_size}")
+        print(f"✅ 真实相位NaN像素数 = {np.sum(np.isnan(self.true_phase))}")
+        print(f"✅ 干涉图1 NaN像素数 = {np.sum(np.isnan(self.interferograms[0]))}")
 
+        return self.interferograms, self.true_phase, self.rho, self.theta, self.circle_mask
